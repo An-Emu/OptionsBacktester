@@ -1,47 +1,80 @@
 import datetime
 import math
 import scipy.stats as stats
+import numpy as np
 
 class Contract:
     def __init__(self, inst, K, exp, ctype, quantity):
         self.instrument = inst
         self.strike = K
         self.expiration = exp
-        self.optType = ctype
+        self.opt_type = ctype
         self.qty = quantity
-        #need to track price history for each contract
 
 class Position:
-    def __init__(self, opndate, contractList):
-        self.openDate = opndate
-        self.isOpen = 1
-        self.contractList = contractList
-        #need to track price history for each contract
-        #should assign open price
+    def __init__(self, opndate, contracts):
+        self.open_date = opndate
+        self.is_open = 1
+        self.contracts = contracts
+        self.value_history = []
+        self.xt_history = [] #total value of position (including BPR)
+        self.dyt_history = [] #history of ln(x_{t+dt}/x_t)
         
-    def closePos(self, clsdate):
-        self.isOpen = 0
-        self.closeDate = clsdate
-        #should assign close price, close date, cacl P/L
+    def close_pos(self, clsdate):
+        self.is_open = 0        
+        self.close_date = clsdate
+        self.close_price = self.value
+        if self.close_price >= self.init_value:
+            self.win=1
+        else:
+            self.win=0
         
-    def updateValue(self):
+    def update_value(self,date):
         self.value = 0
         self.delta = 0
         self.theta = 0
         self.rho = 0
         self.vega = 0
         self.gamma = 0
-        for c in self.contractList:
+        for c in self.contracts:
             self.value = self.value + c.price
             self.delta = self.delta + c.delta
             self.theta = self.theta + c.theta
             self.rho = self.rho + c.rho
             self.vega = self.vega + c.vega
             self.gamma = self.gamma + c.gamma
-
-#need to track price history for account
         
-def estATMVol(VIX, VXST, t):
+        self.days_held = (date - self.open_date).days
+        self.value_history.append([date,self.value])
+        
+        if date == self.open_date:
+            self.init_value = self.value
+            bpe = 0
+            for c in self.contracts:
+                bpe = bpe + c.strike*c.qty*100                    
+            if bpe>0: bpe=0
+            self.bpr = -(bpe - self.init_value*100) #initial investment or margin requirement
+        
+        self.pl = (self.value - self.init_value)*100
+        self.pl_pct = self.pl/self.bpr #percent gain or loss of initial investment
+        self.xt_history.append(self.pl+self.bpr) #total position value at time t
+        self.rt = self.xt_history[-1]/self.bpr #position return (multiple on investment)
+
+        
+        if date > self.open_date:
+            #history of daily log returns
+            self.dyt_history.append(math.log(max(self.xt_history[-1]/self.xt_history[-2], 1e-8)))
+            self.dgr = self.rt**(1/self.days_held) #daily growth rate
+            self.cagr = self.dgr**365 #annual growth multiple
+            self.cagr_pct = (self.cagr-1) #annual growth rate (%)
+            self.ccgr = math.log(max(self.cagr,1e-8)) #continuously compounded growth rate per year
+            self.volatility_annual = np.std(self.dyt_history)*math.sqrt(365)
+            self.gsd = math.exp(self.volatility_annual) #geometric standard dev
+            self.gsd_pct = (self.gsd-1)
+            
+        #phistory=[row[1] for row in self.value_history]
+        
+def est_atm_vol(VIX, VXST, t):
     """
     Estimates at-the-money volatility for SPX or SPY options with time to 
     expiration, t, based on correlations from a small set of historical data.
@@ -52,33 +85,33 @@ def estATMVol(VIX, VXST, t):
     t = time to expiration, in years
     
     CONSTANTS
-    c1 = fit coefficient for equation Sigma_BS(0,30/365) ~= c1*VIX+c0, based on
+    c1 = fit coefficient for equation sigma_BS(0,30/365) ~= c1*VIX+c0, based on
     historical data
-    c0 = fit coefficient for equation Sigma_BS(0,30/365) ~= c1*VIX+c0, based on
+    c0 = fit coefficient for equation sigma_BS(0,30/365) ~= c1*VIX+c0, based on
     historical data
     
     OUTPUTS
-    Sigma_BS(0,t) = at-the-money volatility for options expiring in t years, on
+    sigma_BS(0,t) = at-the-money volatility for options expiring in t years, on
     the date of interest.
     """
 
     c1 = 0.899
     c0 = -0.843/100
-    SigmaVIX = VIX/100
-    SigmaVXST = VXST/100
+    sigmaVIX = VIX/100
+    sigmaVXST = VXST/100
 
     if (t <= 9/365):
-        IV = c1*SigmaVXST + c0 # If less than 9 days to expiration, use VXST 
+        iv = c1*sigmaVXST + c0 # If less than 9 days to expiration, use VXST 
         
     elif (t<=30/365):
         # If 9 < days to expiration <= 30, use linear interpolation between VXST and VIX
-        IV = 365/21*c1*(SigmaVIX-SigmaVXST)*(t-9/365) + c1*SigmaVXST+c0 
+        iv = 365/21*c1*(sigmaVIX-sigmaVXST)*(t-9/365) + c1*sigmaVXST+c0 
     else:
-        IV = c1*SigmaVIX + c0 # If greater than 30 days to expiration, use VIX
+        iv = c1*sigmaVIX + c0 # If greater than 30 days to expiration, use VIX
         
-    return IV
+    return iv
 
-def SSVI(beta1, beta2, gamma1, gamma2, eta, rho, k, t, theta):
+def ssvi(beta1, beta2, gamma1, gamma2, eta, rho, k, t, theta):
     """
     Calculate implied volatility based on the SSVI model: 
     https://mfe.baruch.cuny.edu/wp-content/uploads/2013/04/BloombergSVI2013.pdf
@@ -113,7 +146,7 @@ def SSVI(beta1, beta2, gamma1, gamma2, eta, rho, k, t, theta):
     # Return Implied Volatility
     return (w/t)**0.5
 
-def BSmodel(contract, Stock, Rate, Div, Sigma, Time):
+def bs_model(contract, stock, rate, div, sigma, time):
     """
     Calculate prices of calls and puts based on the Black-Scholes model
     https://quantpie.co.uk/bsm_formula/bs_summary.php
@@ -121,13 +154,13 @@ def BSmodel(contract, Stock, Rate, Div, Sigma, Time):
     Checked outputs against https://www.math.drexel.edu/~pg/fin/VanillaCalculator.html
     
     INPUTS
-    Stock = Price of the underlying
-    Strike = Strike price of the option
-    Rate = risk free interest rate (annualized)
-    Div = dividend yield (annualized)
-    Sigma = Volatility
-    Time = time to expiration [years]
-    OptType = Specifies whether option is call or put. To specify call, use "Call","call","C", or "c". Otherwise OptType is assumed to be Put.
+    stock = Price of the underlying
+    strike = strike price of the option
+    rate = risk free interest rate (annualized)
+    div = dividend yield (annualized)
+    sigma = Volatility
+    time = time to expiration [years]
+    opt_type = Specifies whether option is call or put. To specify call, use "Call","call","C", or "c". Otherwise opt_type is assumed to be Put.
     
     OUTPUTS
     Outputs an array, [Price,delta,theta_daily,vega,gamma,rho], where Price is the price of the option, and the option greeks are given in elements 2-6.
@@ -141,95 +174,97 @@ def BSmodel(contract, Stock, Rate, Div, Sigma, Time):
     would return price & net-greeks for QTY 5 vertical put spreads with strikes Kshort and Klong, and time to expiration t.
     """
     
-    Strike = contract.strike
-    OptType = contract.optType
+    strike = contract.strike
+    opt_type = contract.opt_type
     
-    if (Time <= 5.708e-5) :
-        Time = 5.708e-5 #1hr left
-        d1 = (math.log(Stock/Strike))
-    else:
-        d1 = (math.log(Stock/Strike) + (Rate - Div + Sigma*Sigma/2.0)*Time)/(Sigma*math.sqrt(Time))    
-        
-    d2 = d1 - Sigma*math.sqrt(Time)
+    if (time <= 5.708e-5) :
+        time = 5.708e-5 #1hr left
+#        d1 = (math.log(stock/strike))
+#    else:
+#        d1 = (math.log(stock/strike) + (rate - div + sigma*sigma/2.0)*time)/(sigma*math.sqrt(time))    
+    d1 = (math.log(stock/strike) + (rate - div + sigma*sigma/2.0)*time)/(sigma*math.sqrt(time))     
+    d2 = d1 - sigma*math.sqrt(time)
     
     # useful calculations
     nd1 = (2*math.pi)**-0.5*math.exp(-0.5*d1**2); # dN(d1)/d(d1) = N'(d1)
-    emdivt = math.exp(-Div*Time)
-    emrt = math.exp(-Rate * Time)
+    emdivt = math.exp(-div*time)
+    emrt = math.exp(-rate * time)
     Nd1 = stats.norm.cdf(d1)
     Nd2 = stats.norm.cdf(d2)
     Nmd1 = stats.norm.cdf(-d1)
     Nmd2 = stats.norm.cdf(-d2)
         
     # non-type dependent partial derivatives (gamma and vega)
-    contract.gamma = emdivt*nd1/(Stock*Sigma*Time**0.5)
-    contract.vega = Stock*emdivt*(Time**0.5)*nd1
+    contract.gamma = emdivt*nd1/(stock*sigma*time**0.5)
+    contract.vega = stock*emdivt*(time**0.5)*nd1
     
     # Calculate option prices and type-specific partial derivatives (delta,rho,theta)
-    if (OptType == "c" or OptType == "Call" or OptType == "call" or OptType == "C"):
+    if (opt_type == "c" or opt_type == "Call" or opt_type == "call" or opt_type == "C"):
         # call
-        contract.price = contract.qty*max(0,(emdivt*Stock*Nd1 - Strike*emrt*Nd2))
+        contract.price = contract.qty*max(0,(emdivt*stock*Nd1 - strike*emrt*Nd2))
         contract.delta = contract.qty*(emdivt*Nd1)
-        contract.rho = contract.qty*(Strike*emrt*Time*Nd2)
-        theta_yr = contract.qty*(Stock*emdivt*Div*Nd1 - Strike*emrt*Rate*Nd2 - Stock*emdivt*0.5*Sigma*nd1*Time**-0.5)
+        contract.rho = contract.qty*(strike*emrt*time*Nd2)
+        theta_yr = contract.qty*(stock*emdivt*div*Nd1 - strike*emrt*rate*Nd2 - stock*emdivt*0.5*sigma*nd1*time**-0.5)
         contract.theta = theta_yr/365
     else:
         # put 
-        contract.price = contract.qty*max(0,(Strike*emrt + (emdivt*Stock*Nd1 - Strike*emrt*Nd2) - emdivt*Stock))
+        contract.price = contract.qty*max(0,(strike*emrt + (emdivt*stock*Nd1 - strike*emrt*Nd2) - emdivt*stock))
         contract.delta = contract.qty*(-emdivt*Nmd1)
-        contract.rho = contract.qty*(-Strike*emrt*Time*Nmd2)
-        theta_yr = contract.qty*(-Stock*emdivt*Div*Nmd1 + Strike*emrt*Rate*Nmd2 - Stock*emdivt*(0.5*Sigma)*nd1*(Time**-0.5))
+        contract.rho = contract.qty*(-strike*emrt*time*Nmd2)
+        theta_yr = contract.qty*(-stock*emdivt*div*Nmd1 + strike*emrt*rate*Nmd2 - stock*emdivt*(0.5*sigma)*nd1*(time**-0.5))
         contract.theta = theta_yr/365
 
     #return [Price,delta,theta_daily,vega,gamma,rho]
 
-def strikeFromDelta(Stock, Delta, Rate, Div, Sigma, Time, OptType):
+def strike_from_delta(stock, delta, rate, div, sigma, time, opt_type):
     """
     Given the delta of an option, solve for the option's strike price per the Black-Scholes model.
 
     INPUTS
-    Stock = Price of the underlying
-    Delta = delta (d/dS) of the option
-    Rate = risk free interest rate (annualized)
-    Div = dividend yield (annualized)
-    Sigma = Volatility
-    Time = time to expiration [years]
-    OptType = Specifies whether option is call or put. To specify call, use "Call","call","C", or "c". Otherwise OptType is assumed to be Put.
+    stock = Price of the underlying
+    delta = delta (d/dS) of the option
+    rate = risk free interest rate (annualized)
+    div = dividend yield (annualized)
+    sigma = Volatility
+    time = time to expiration [years]
+    opt_type = Specifies whether option is call or put. To specify call, use "Call","call","C", or "c". Otherwise opt_type is assumed to be Put.
     
     OUTPUTS
-    Returns the Strike of the specified option
+    Returns the strike of the specified option
     """
-    if Time<5.708e-5: 
-        Time=5.708e-5
+    if time<5.708e-5: 
+        time=5.708e-5
     
-    if (OptType == "c" or OptType == "Call" or OptType == "call" or OptType == "c"):
-        d1 = stats.norm.ppf(Delta*math.exp(Div*Time))
+    if (opt_type == "c" or opt_type == "Call" or opt_type == "call" or opt_type == "c"):
+        d1 = stats.norm.ppf(delta*math.exp(div*time))
     else:
-        d1 = stats.norm.ppf((Delta+math.exp(-Div*Time))*math.exp(Div*Time))
+        d1 = stats.norm.ppf((delta+math.exp(-div*time))*math.exp(div*time))
 
-    # Return Strike
-    return Stock*math.exp(-(d1*Sigma*math.sqrt(Time)-(Rate-Div+Sigma*Sigma/2)*Time))
+    # Return strike
+    return stock*math.exp(-(d1*sigma*math.sqrt(time)-(rate-div+sigma*sigma/2)*time))
 
-def strikeFromDelta2(Stock, Delta, Rate, Div, ATMVol, Time, OptType, beta1, beta2, gamma1, gamma2, eta, rho, tol):
+def strike_from_delta2(stock, delta, rate, div, atm_vol, time, opt_type, beta1, beta2, gamma1, gamma2, eta, rho, tol):
     
     #init
-    vol = ATMVol
+    if time<5.708e-5: 
+        time=5.708e-5
+    vol = atm_vol
     dK = tol*2
-    K0 =0
+    K0 = 0
     #loop to converge on strike
     while dK > tol:
-        K=strikeFromDelta(Stock, Delta, Rate, 0, vol, Time, OptType)
-        k = math.log(K/(Stock*math.exp(Rate*Time)))
-        theta = ATMVol**2*Time
-        vol = SSVI(beta1,beta2,gamma1,gamma2,eta,rho,k,Time,theta)
+        K = strike_from_delta(stock, delta, rate, 0, vol, time, opt_type)
+        k = math.log(K/(stock*math.exp(rate*time)))
+        theta = atm_vol**2*time
+        vol = ssvi(beta1, beta2, gamma1, gamma2, eta, rho, k, time, theta)
         dK = abs(K-K0)
         K0 = K
     #round strike to nearest dollar (update to enable .50?)
-    K=round(float(K),0)
+    K = round(float(K), 0)
     return K
         
 
-def GetNextHighVal(val, valuelist):
+def get_next_high_val(val, valuelist):
     valuelist = (int(t) for t in valuelist if t != '')
     valuelist = [t for t in valuelist if t <= int(val)]
     if valuelist: return max(valuelist)
@@ -243,3 +278,40 @@ def get_third_friday(d, lbnd, ubnd):
             return dexp
     
     raise RuntimeError('Could not find valid 3rd friday within specified range')
+
+def xirr(capital_array,time_held_array,final_acct_value,r=0.1,tol=0.1):
+    """ INPUTS 
+    capital_array = array of numbers indicating how much was invested in each
+        individual contribution.
+    time_held_array = array indicating time (in years) for which each 
+        corresponding investment in capital_array was held.
+    
+                
+    
+    """
+    #input checking
+    c = np.array(capital_array)
+    t = np.array(time_held_array)
+    l = len(np.atleast_1d(c))
+    F = float(final_acct_value)
+    if len(np.atleast_1d(t)) != l:
+        raise RuntimeError('Capital history and time history must be equal')
+    elif r<-1:
+        raise Warning('r must be >=-1')
+        r=-1
+    elif final_acct_value < 0:
+        'Invalid final acct value'
+    
+    #init    
+    computed_final_val = F - tol*10
+    while (abs(computed_final_val - F) > tol):
+        computed_final_val = np.sum(c*(1+r)**t)
+                
+        #calculate derivative and update r
+        dFdr = np.sum(t*c*(1+r)**(t-1))
+        r = (F - computed_final_val)/dFdr + r
+        if r<-1:
+            r=-1
+    
+    return r #return rate of return
+                    
